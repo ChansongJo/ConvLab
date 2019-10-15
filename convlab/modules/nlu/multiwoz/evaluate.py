@@ -14,6 +14,7 @@ import torch
 from convlab.modules.nlu.multiwoz import MILU
 from convlab.modules.nlu.multiwoz import OneNetLU
 from convlab.modules.nlu.multiwoz import SVMNLU
+from convlab.modules.nlu.multiwoz import BERTNLU
 
 seed = 2019
 random.seed(seed)
@@ -29,7 +30,7 @@ def da2triples(dialog_act):
     return triples
 
 
-if __name__ == '__main__':
+def main():
     if len(sys.argv) != 2 :
         print("usage:")
         print("\t python evaluate.py model_name")
@@ -42,10 +43,12 @@ if __name__ == '__main__':
         model = MILU(model_file="https://convlab.blob.core.windows.net/models/milu.tar.gz")
     elif model_name == 'SVMNLU':
         model = SVMNLU(model_file="https://convlab.blob.core.windows.net/models/svm_multiwoz.zip")
+    elif model_name == 'BERTNLU':
+        model = BERTNLU(mode='all')
     else:
         raise Exception("Available model: OneNetLU, MILU, SVMNLU")
 
-    archive = zipfile.ZipFile('../../../../data/multiwoz/test.json.zip', 'r')
+    archive = zipfile.ZipFile('data/multiwoz/test.json.zip', 'r')
     test_data = json.load(archive.open('test.json'))
     TP, FP, FN = 0, 0, 0
     sen_num = 0
