@@ -3,13 +3,17 @@
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from convlab.agent import memory
 from convlab.agent import net
 from convlab.agent.algorithm.sarsa import SARSA
+from convlab.agent.net import gaussian_log_likelihood
+
 from convlab.agent.net import net_util
-from convlab.lib import logger, util
+from convlab.lib import logger, util, math_util
 from convlab.lib.decorator import lab_api
+
 
 logger = logger.get_logger(__name__)
 
@@ -219,6 +223,7 @@ class DQNBase(VanillaDQN):
     def update_nets(self):
         if util.frame_mod(self.body.env.clock.frame, self.net.update_frequency, self.body.env.num_envs):
             if self.net.update_type == 'replace':
+
                 net_util.copy(self.net, self.target_net)
             elif self.net.update_type == 'polyak':
                 net_util.polyak_update(self.net, self.target_net, self.net.polyak_coef)
@@ -358,3 +363,134 @@ class DoubleDQN(DQN):
         super().init_nets(global_nets)
         self.online_net = self.net
         self.eval_net = self.target_net
+
+
+    
+
+
+class BQN(WarmUpDQN):
+    '''
+    DQN class
+
+    e.g. algorithm_spec
+    "algorithm": {
+        "name": "WarmUpDQN",
+        "action_pdtype": "Argmax",
+        "action_policy": "epsilon_greedy",
+        "warmup_epi": 300,
+        "explore_var_spec": {
+            "name": "linear_decay",
+            "start_val": 1.0,
+            "end_val": 0.1,
+            "start_step": 10,
+            "end_step": 1000,
+        },
+        "gamma": 0.99,
+        "training_batch_iter": 8,
+        "training_iter": 4,
+        "training_frequency": 10,
+        "training_start_step": 10
+    }
+    '''
+    def __init__(self, agent, global_nets=None, load_model=False, model_path=None):
+        super().__init__(agent, global_nets)
+        self.sample_size = self.algorithm_spec.get('sample_size', 2)
+        self.in_dim = self.body.state_dim
+        self.out_dim = net_util.get_out_dim(self.body)
+        self.tau = 0.5
+
+
+    def train(self):
+
+        if util.in_eval_lab_modes():
+            return np.nan
+        clock = self.body.env.clock
+            
+        if self.to_train == 1:
+            total_loss = torch.tensor(0.0)
+            total_q_loss = torch.tensor(0.0)
+            total_reg_loss = torch.tensor(0.0)
+            for _ in range(self.training_iter):
+                batches = []
+                if self.body.warmup_memory.size >= self.body.warmup_memory.batch_size:
+                    batches.append(self.warmup_sample())
+                if self.body.memory.size >= self.body.memory.batch_size:
+                    batches.append(self.sample())
+                clock.set_batch_size(sum(len(batch) for batch in batches))
+                for batch in batches:
+                    for _ in range(self.training_batch_iter):
+                        loss, q_loss, reg_loss = self.calc_q_loss(batch)
+                        self.net.train_step(loss, self.optim, self.lr_scheduler, clock=clock, global_net=self.global_net)
+                        total_loss += loss
+                        total_q_loss += q_loss
+                        total_reg_loss += reg_loss
+            loss = total_loss / (self.training_iter * self.training_batch_iter)
+            q_loss = total_q_loss / (self.training_iter * self.training_batch_iter)
+            reg_loss = total_reg_loss / (self.training_iter * self.training_batch_iter)
+            # reset
+            self.to_train = 0
+
+            logger.info(f'Trained {self.name} at epi: {clock.epi}, warmup_size: {self.body.warmup_memory.size}, memory_size: {self.body.memory.size}, loss: {loss:g}, q_loss: {q_loss:g}, reg_loss: {reg_loss:g}')
+            return loss.item()
+        else:
+            return np.nan
+    
+    def calc_q_loss(self, batch, elbo=False):
+        '''Compute the Q value loss using predicted and target Q values from the appropriate networks'''
+        states = batch['states'] # s
+        actions = batch['actions']
+        rewards = batch['rewards'] #r
+        next_states = batch['next_states'] #s'
+        dones = batch['dones']
+
+        q_preds = self.net(states)
+        with torch.no_grad():
+            # Use online_net to select actions in next state
+            online_next_q_preds = self.online_net(next_states)
+            # Use eval_net to calculate next_q_preds for actions chosen by online_net
+            next_q_preds = self.eval_net(next_states, resample=True)
+        act_q_preds = q_preds.gather(-1, actions.long().unsqueeze(-1)).squeeze(-1)
+        online_actions = online_next_q_preds.argmax(dim=-1, keepdim=True)
+        max_next_q_preds = next_q_preds.gather(-1, online_actions).squeeze(-1)
+        max_q_targets = rewards + self.gamma * (1 - dones) * max_next_q_preds
+        # logger.debug(f'act_q_preds: {act_q_preds}\nmax_q_targets: {max_q_targets}')
+
+        q_loss = self.net.loss_fn(act_q_preds, max_q_targets)
+        reg_loss = self.get_loss(max_q_targets, self.net.mean, self.net.log_std, actions)
+        #logger.warning(q_loss)
+        #logger.warning(reg_loss)
+
+
+        # loss = self.tau * q_loss + (1 - self.tau) * reg_loss
+        loss = q_loss + reg_loss
+        #loss.to('cuda')
+
+        # TODO use the same loss_fn but do not reduce yet
+        if 'Prioritized' in util.get_class_name(self.body.memory):  # PER
+            errors = (max_q_targets - act_q_preds.detach()).abs().cpu().numpy()
+            self.body.memory.update_priorities(errors)
+        return loss, q_loss, reg_loss
+    
+    @lab_api
+    def act(self, state):
+        '''Selects and returns a discrete action for body using the action policy'''
+        return super().act(state)
+    
+    @lab_api
+    def update(self):
+        '''Updates self.target_net and the explore variables'''
+        self.target_net.reset_noise()
+        self.net.reset_noise()
+
+        self.update_nets()
+        return super().update()
+    def get_loss(self, Y, mean, log_std, actions):
+        # q_process
+        mean = mean.gather(-1, actions.long().unsqueeze(-1)).squeeze(-1)
+        log_std = log_std.gather(-1, actions.long().unsqueeze(-1)).squeeze(-1)
+
+        gau = -gaussian_log_likelihood(Y, mean, log_std.clamp(min=-50, max=50).exp())
+        reg = self.net.regularization()
+
+        loss = (gau + 1e-2 * reg).mean()
+        return loss

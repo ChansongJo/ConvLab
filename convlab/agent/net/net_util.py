@@ -3,6 +3,7 @@
 
 import os
 from functools import partial, wraps
+from collections import OrderedDict
 
 import pydash as ps
 import torch
@@ -40,6 +41,19 @@ def build_fc_model(dims, activation=None):
     layers = []
     for in_d, out_d in dim_pairs:
         layers.append(nn.Linear(in_d, out_d))
+        if activation is not None:
+            layers.append(get_activation_fn(activation))
+    model = nn.Sequential(*layers)
+    return model
+
+def build_custom_model(dims, net, activation=None):
+    '''Build a full-connected model by interleaving nn.Linear and activation_fn'''
+    assert len(dims) >= 2, 'dims need to at least contain input, output'
+    # shift dims and make pairs of (in, out) dims per layer
+    dim_pairs = list(zip(dims[:-1], dims[1:]))
+    layers = []
+    for in_d, out_d in dim_pairs:
+        layers.append(net(in_d, out_d))
         if activation is not None:
             layers.append(get_activation_fn(activation))
     model = nn.Sequential(*layers)
@@ -154,7 +168,7 @@ def init_params(module, init_fn):
     classname = util.get_class_name(module)
     if 'Net' in classname:  # skip if it's a net, not pytorch layer
         pass
-    elif any(k in classname for k in ('BatchNorm', 'Conv', 'Linear')):
+    elif any(k in classname for k in ('BatchNorm', 'Conv', 'Linear', 'BayesianLinear')):
         init_fn(module.weight)
         nn.init.constant_(module.bias, bias_init)
     elif 'GRU' in classname:
@@ -197,7 +211,15 @@ def save_algorithm(algorithm, ckpt=None):
 def load(net, model_path):
     '''Save model weights from a path into a net module'''
     device = None if torch.cuda.is_available() else 'cpu'
-    net.load_state_dict(torch.load(util.smart_path(model_path), map_location=device))
+    target_net_dict = torch.load(util.smart_path(model_path), map_location=device)
+
+    if net.__class__.__name__ == 'BNNbyDropout':
+        logger.warning(target_net_dict.keys())
+        for key in target_net_dict:
+            if 'noise' in key:
+                target_net_dict[key] = torch.zeros_like(net.model.drop.noise)
+
+    net.load_state_dict(target_net_dict)
 
 
 def load_algorithm(algorithm):
@@ -224,7 +246,7 @@ def load_algorithm(algorithm):
 def copy(src_net, tar_net):
     '''Copy model weights from src to target'''
     tar_net.load_state_dict(src_net.state_dict())
-
+    
 
 def polyak_update(src_net, tar_net, old_ratio=0.5):
     '''
