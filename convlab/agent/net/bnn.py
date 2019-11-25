@@ -4,6 +4,8 @@ import torch
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.autograd import Variable
+
 import math
 import numpy as np
 
@@ -29,7 +31,7 @@ class BDropout(torch.nn.Dropout):
     Representing Model Uncertainty in Deep Learning", 2016.
     """
 
-    def __init__(self, rate=0.1, reg=1.0, **kwargs):
+    def __init__(self, rate=0.25, reg=1.0, **kwargs):
         """Constructs a BDropout.
 
         Args:
@@ -287,7 +289,7 @@ def bayesian_model(in_features,
             else:
                 modules["drop"] = drop_i
 
-        modules["nonlin"] = nonlin
+    modules[f"nonlin"] = nonlin
 
     # Output layer.
     modules["fc_out"] = torch.nn.Linear(dims[-1], out_features)
@@ -312,7 +314,7 @@ def gaussian_log_likelihood(targets, pred_means, pred_stds=None, dbg=None):
     deltas = pred_means - targets
     if pred_stds is not None:
 
-        lml = -((deltas / pred_stds)**2).mean(-1)*0.5 - pred_stds.log().mean(-1)*0.5 - torch.log(2 * torch.tensor(math.pi))
+        lml = -((deltas / pred_stds)**2).sum(-1)*0.5 - pred_stds.log().sum(-1)*0.5 - 0.5*torch.log(2 * torch.tensor(math.pi))
         if torch.isinf(lml):
             logger.info(f'deltas/pred_stds squared sum : {((deltas / pred_stds)**2).mean(-1) * 0.5}')
             logger.info(f'deltas/preds : {deltas / pred_stds}')
@@ -321,7 +323,7 @@ def gaussian_log_likelihood(targets, pred_means, pred_stds=None, dbg=None):
             logger.info(f'pred_stds raw : {dbg}')
             exit()
     else:
-        lml = -(deltas**2).mean(-1)
+        lml = -(deltas**2).sum(-1)
     
     return lml
 
@@ -359,7 +361,7 @@ class BNNbyDropout(Net, nn.Module):
             'tau'
         ])
 
-        dropout_layers = CDropout
+        self.dropout_layer = BDropout if self.dropout_layer == 'BDropout' else CDropout
         nonlin = net_util.get_activation_fn(self.hid_layers_activation)
         output_nonlin = net_util.get_activation_fn(self.out_layer_activation) if self.out_layer_activation is not None else None
         weight_initializer = torch.nn.init.kaiming_normal_
@@ -367,7 +369,7 @@ class BNNbyDropout(Net, nn.Module):
         bias_initializer = partial(torch.nn.init.uniform_, a=-1.0, b=1.0)
         self.loss_fn = net_util.get_loss_fn(self, self.loss_spec)
         self.model = bayesian_model(self.in_dim, self.out_dim *2, self.hid_layers,
-                                    nonlin, output_nonlin, weight_initializer, bias_initializer, dropout_layers)
+                                    nonlin, output_nonlin, weight_initializer, bias_initializer, self.dropout_layer)
 
 
         self.to(self.device)
@@ -375,6 +377,8 @@ class BNNbyDropout(Net, nn.Module):
     def forward(self, x, resample=False):
         output = self.model(x, resample)
         self.mean, self.log_std = output.split([self.out_dim, self.out_dim], dim=-1)
+        self.log_std = torch.tanh(self.log_std)
+        #out = self.sample_gaussian(self.mean, self.log_std)
         return self.mean
     
     def regularization(self):
@@ -384,9 +388,17 @@ class BNNbyDropout(Net, nn.Module):
         '''for updating and reloading nets'''
         children = list(self.model._modules.values())
         for child in children:
-            if isinstance(child, BDropout):
+            if isinstance(child, self.dropout_layer):
                 child._update_noise(torch.zeros((1, 1)))
-    
+
+    def sample_gaussian(self, mu, logvar, std=1.5):
+        assert mu.size() == logvar.size()
+        logvar = torch.tanh(logvar)
+        _size = logvar.size()
+        epsilon = Variable(torch.normal(mean=torch.zeros(*_size), std=std))
+        std = torch.exp(0.5 * logvar)
+        epsilon = epsilon.to(self.device)
+        return mu + std*epsilon     
 
 
 
