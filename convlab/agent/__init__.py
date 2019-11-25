@@ -118,8 +118,14 @@ class DialogAgent(Agent):
             self.nlg = NlgClass(**params) 
         self.body = body
         body.agent = self
+        
         AlgorithmClass = getattr(algorithm, ps.get(self.agent_spec, 'algorithm.name'))
-        self.algorithm = AlgorithmClass(self, global_nets)
+        if ps.get(self.agent_spec, 'algorithm.load_model'):
+            load_model = ps.get(self.agent_spec, 'algorithm.load_model')
+            model_path = ps.get(self.agent_spec, 'algorithm.model_path')
+            self.algorithm = AlgorithmClass(self, global_nets, load_model=load_model, model_path=model_path)
+        else:
+            self.algorithm = AlgorithmClass(self, global_nets)
         if ps.get(self.agent_spec, 'memory'):
             MemoryClass = getattr(memory, ps.get(self.agent_spec, 'memory.name'))
             self.body.memory = MemoryClass(self.agent_spec['memory'], self.body)
