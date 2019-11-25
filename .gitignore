@@ -119,3 +119,6 @@ output
 # log
 *.log
 
+bqn_test.json
+speed_test.json
+baseline_test.json
