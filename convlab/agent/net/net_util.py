@@ -46,6 +46,20 @@ def build_fc_model(dims, activation=None):
     model = nn.Sequential(*layers)
     return model
 
+def build_dropout_model(dims, activation=None, rate=0.25):
+    '''Build a NN+dropout model by interleaving nn.Linear and activation_fn'''
+    assert len(dims) >= 2, 'dims need to at least contain input, output'
+    # shift dims and make pairs of (in, out) dims per layer
+    dim_pairs = list(zip(dims[:-1], dims[1:]))
+    layers = []
+    for in_d, out_d in dim_pairs:
+        layers.append(nn.Linear(in_d, out_d))
+        layers.append(nn.Dropout(rate))
+        if activation is not None:
+            layers.append(get_activation_fn(activation))
+    model = nn.Sequential(*layers)
+    return model
+
 def build_custom_model(dims, net, activation=None):
     '''Build a full-connected model by interleaving nn.Linear and activation_fn'''
     assert len(dims) >= 2, 'dims need to at least contain input, output'
