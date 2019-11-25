@@ -317,7 +317,10 @@ class WarmUpDQN(DQN):
             for _ in range(self.training_iter):
                 batches = []
                 if self.body.warmup_memory.size >= self.body.warmup_memory.batch_size:
-                    batches.append(self.warmup_sample())
+                    if clock.get() < 10000:
+                        batches.append(self.warmup_sample())
+                    else:
+                        batches.append(self.sample())
                 if self.body.memory.size >= self.body.memory.batch_size:
                     batches.append(self.sample())
                 clock.set_batch_size(sum(len(batch) for batch in batches))
@@ -365,9 +368,6 @@ class DoubleDQN(DQN):
         self.eval_net = self.target_net
 
 
-    
-
-
 class BQN(WarmUpDQN):
     '''
     DQN class
@@ -397,7 +397,11 @@ class BQN(WarmUpDQN):
         self.sample_size = self.algorithm_spec.get('sample_size', 2)
         self.in_dim = self.body.state_dim
         self.out_dim = net_util.get_out_dim(self.body)
-        self.tau = 0.5
+        if load_model:
+            self.net.load_state_dict(torch.load(model_path + '_net_model.pt'))
+            self.target_net.load_state_dict(torch.load(model_path + '_target_net_model.pt'))
+            self.optim.load_state_dict(torch.load(model_path + '_net_optim.pt'))
+        self.tau = 0.25
 
 
     def train(self):
@@ -412,10 +416,14 @@ class BQN(WarmUpDQN):
             total_reg_loss = torch.tensor(0.0)
             for _ in range(self.training_iter):
                 batches = []
-                if self.body.warmup_memory.size >= self.body.warmup_memory.batch_size:
-                    batches.append(self.warmup_sample())
+
                 if self.body.memory.size >= self.body.memory.batch_size:
                     batches.append(self.sample())
+                if self.body.warmup_memory.size >= self.body.warmup_memory.batch_size:
+                    if clock.get() < 10000:
+                        batches.append(self.warmup_sample())
+                    else:
+                        batches.append(self.sample())
                 clock.set_batch_size(sum(len(batch) for batch in batches))
                 for batch in batches:
                     for _ in range(self.training_batch_iter):
@@ -438,7 +446,7 @@ class BQN(WarmUpDQN):
     def calc_q_loss(self, batch, elbo=False):
         '''Compute the Q value loss using predicted and target Q values from the appropriate networks'''
         states = batch['states'] # s
-        actions = batch['actions']
+        actions = batch['actions'] # a
         rewards = batch['rewards'] #r
         next_states = batch['next_states'] #s'
         dones = batch['dones']
@@ -449,47 +457,38 @@ class BQN(WarmUpDQN):
             online_next_q_preds = self.online_net(next_states)
             # Use eval_net to calculate next_q_preds for actions chosen by online_net
             next_q_preds = self.eval_net(next_states, resample=True)
+
         act_q_preds = q_preds.gather(-1, actions.long().unsqueeze(-1)).squeeze(-1)
         online_actions = online_next_q_preds.argmax(dim=-1, keepdim=True)
         max_next_q_preds = next_q_preds.gather(-1, online_actions).squeeze(-1)
         max_q_targets = rewards + self.gamma * (1 - dones) * max_next_q_preds
-        # logger.debug(f'act_q_preds: {act_q_preds}\nmax_q_targets: {max_q_targets}')
 
         q_loss = self.net.loss_fn(act_q_preds, max_q_targets)
         reg_loss = self.get_loss(max_q_targets, self.net.mean, self.net.log_std, actions)
-        #logger.warning(q_loss)
-        #logger.warning(reg_loss)
 
 
-        # loss = self.tau * q_loss + (1 - self.tau) * reg_loss
-        loss = q_loss + reg_loss
-        #loss.to('cuda')
+        loss = self.tau * q_loss + (1 - self.tau) * reg_loss
 
         # TODO use the same loss_fn but do not reduce yet
         if 'Prioritized' in util.get_class_name(self.body.memory):  # PER
             errors = (max_q_targets - act_q_preds.detach()).abs().cpu().numpy()
             self.body.memory.update_priorities(errors)
         return loss, q_loss, reg_loss
-    
-    @lab_api
-    def act(self, state):
-        '''Selects and returns a discrete action for body using the action policy'''
-        return super().act(state)
-    
+
     @lab_api
     def update(self):
         '''Updates self.target_net and the explore variables'''
         self.target_net.reset_noise()
         self.net.reset_noise()
-
         self.update_nets()
         return super().update()
+
     def get_loss(self, Y, mean, log_std, actions):
         # q_process
         mean = mean.gather(-1, actions.long().unsqueeze(-1)).squeeze(-1)
         log_std = log_std.gather(-1, actions.long().unsqueeze(-1)).squeeze(-1)
 
-        gau = -gaussian_log_likelihood(Y, mean, log_std.clamp(min=-50, max=50).exp())
+        gau = -gaussian_log_likelihood(Y, mean, log_std.exp())
         reg = self.net.regularization()
 
         loss = (gau + 1e-2 * reg).mean()
