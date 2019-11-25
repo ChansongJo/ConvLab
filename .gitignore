@@ -32,6 +32,9 @@ convlab/spec/eval.json
 # trade
 data/trade/
 
+# sumbt
+data/sumbt/
+
 # mdbt data
 data/mdbt/
 data/mdbt.tar.gz
@@ -45,6 +48,8 @@ data/multiwoz/annoted_bio_all_20k.txt
 data/multiwoz/annotated_user_utts_v2.txt
 data/multiwoz/annotated_user_utts_v2_20k.txt
 data/multiwoz/test.json
+convlab/modules/word_dst/multiwoz/mdbt/configs
+
 
 # sclstm
 convlab/modules/nlg/multiwoz/sc_lstm/resource
@@ -56,6 +61,9 @@ convlab/modules/nlg/multiwoz/sc_lstm/sclstm_usr.res
 
 # svm
 convlab/modules/nlu/multiwoz/svm/model/
+
+# bert
+convlab/modules/nlu/multiwoz/bert/multiwoz/data/
 
 # private test script
 private_test.py
